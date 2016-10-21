@@ -1,0 +1,138 @@
+Fusion Ticket Operations:
+
+Runtime Example : Two events, 10000 seats each
+
+-- Event table : key = event_id
+EventEffect = create_event(name, text, url, date, time, event_seat_limit, pmid)
+			  | stop_sales
+			  | restart_sales
+			  | sell x {sold x number of seats}
+			  | return x {x number of seats were returned}
+			  | delete
+			  | showEvent {summarize the number of seats left, current event status and give 			  other info}
+
+-- Discount table : key = discount_id
+DiscountEffect = create_discount(event_id, value)
+				 | update_discount(new_value)
+				 | delete
+				 | showDiscount {show current price}
+
+-- Seat table : key = seat_id
+SeatEffect = create_seat(event_id, price, user_id, discount_id)
+			 | reserve
+			 | free
+			 | cancel
+			 | addDiscount discount_id
+			 | removeDiscount discount_id
+			 | showSeat {summarize status and current price}
+
+-- Carts table : Key = cart_id
+CartEffect = add_cart
+             | remove_cart
+
+-- Order table : key = order_id
+OrderEffect = create_order(cart_id, event_id, [seat_id])
+			  | cancel_order
+			  | update_order([seat_id])
+			  | set_payment_id
+			  | set_send
+			  | set_payed
+			  | set_reserved
+			  | GetOrderSummary
+
+
+--CartOrder table : key = cart_id
+CartOrderEffect = AddOrdersToCart order_id 
+                  | RemoveOrdersFromCart order_id
+                  | GetCartSummary
+
+Transactions:
+
+newEvent :: Int{event_order_limit} -> Int{price}(Map{seat_id, price}?) -> Int{discount} -> {event_info} {creates event & creates event_order_limit seats, updates the price of the ticket and adds a discount entry in the discount table} -> {true}
+
+newOrder :: event_id -> [seat_id] {Checks if event has not been deleted/sales have stopped, check if all seats in the order are free, create_order with the seats in seat_id} -> {MAV}
+
+addToCart :: CartID -> OrderID -> CSN [OrderID] {Check if event has not been deleted/sales have stopped, add order to cart} -> {MAV}
+
+-- No more a transaction 
+removeFromCart :: CartID -> OrderID -> CSN [OrderID] {Remove order from cart}
+
+checkOut :: CartID -> CSN () {Check if event has not been deleted/sales have stopped, Generate cost of all orders, check if all seats in the order are free, reserve all seats in the order, sum prices of each seat, subtract corresponding discounts, print final amount to be paid} -> {RR}
+
+------------------------------------------------------------------------------------------------------------------------------Fusion Ticket Transactions------------------------------------
+
+newPlacemap :: no_seats
+	pmid <- createPlacemap
+	for i = 1:no_seats
+		seatID <- createSeat(s) pmid
+		addSeatToPlacemap pmid seatId
+	true 
+
+newEvent :: pmid, name, url, time, limit, price, discount_val
+	showPlacemap pmid -> true? {If false return PlaceMap not yet available}
+		eid <- createEvent pmid name url time limit
+		did <- createDiscount eid discount_val
+		[seatIDs] <- showPlacemap pmid
+		for each seatId in [seatIDs]
+			UpdateEventIdAndPriceInSeat seatId eid price
+			UpdateDiscountInSeat seatId did
+	true
+
+deleteEvent :: EventID - eid
+	showEvent != selling/deleted? {If the event is selling/already deleted throw error}
+		pmid <- showEvent eid
+		[SeatID] <- showPlacemap pmid
+		for each seatid in [SeatID]
+			showSeat != nothing
+				CancelSeat seatid
+		deletePlacemap pmid
+		discountid <- getDiscountByEventID eid {-To be implemented-}
+		deleteDiscount discountid
+		[OrderID] <- getOrdersByEventID {-To be implemented}
+		for each orderid in [OrderID]
+			cartID <- showOrder orderID != cancelled/nothing
+				cancelOrder orderid
+				removeOrderFromCart cartID orderid
+		deleteEvent eid
+
+MAV transaction here, if deleteEvent succeeds all sub deletions with references to the event
+must also succeed.
+
+newOrder :: CartID -> EventID -> [SeatID] 
+	showEvent -> Selling == true?{If newOrder hasn't seen creation of cart/event/seat throw error}
+	for each SeatID in [SeatID]
+		showSeat -> True ?
+		if false : throw error 
+	orderId <- createOrder [SeatID]
+	addOrderToCart CartID orderId
+
+true
+
+checkOut :: CartID
+total -> 0
+[OrderID] <- getCartSummary
+for each eventid, orderId in [OrderID]
+	selling, price_of_seat, discountid <- showEvent
+	showOrder orderId -> status == true?
+		selling == true?
+		[SeatID] <- showOrder orderId
+		reserveSeats [SeatID]
+		sell eventid length_of[SeatID]
+		for each seatId in [SeatID]
+			discountId, price_of_seat <- showSeat
+			discount_value <- showDiscount discountid
+			total += (price_of_seat - discount_value)
+putstrln "Pay : " ++ total
+
+true
+
+reserveSeats :: [SeatID]
+	for each seat in [SeatID]
+		reserveSingleSeat seatId
+
+true
+
+reserveSingleSeat :: SeatID
+		reserveSeat seatId
+
+true

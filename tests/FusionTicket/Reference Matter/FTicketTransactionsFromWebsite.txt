@@ -1,0 +1,102 @@
+Event:
+	takes pmid as input
+	Save Event transaction:
+			$pm->copy($this->event_id)) // put event_id in pm table
+			update Event set event_pm_id={$new_pm_id} where event_id={$this->event_id}
+
+	Delete Event:
+		Check if event is not published
+		Inside Transaction:
+			delete from Seat where seat_event_id = eid
+			delete placemap
+			delete from Discount where discount_event_id
+			DELETE FROM Event WHERE event_id = eid
+
+Placemap: {Must be created before event}
+	CreatePlacemap takes ort_id and pm_name as input
+	DeletePlacemap transaction:
+		$seats = "select count(*) from Seat where seat_event_id ={$this->pm_event_id}
+		if $seats > 0 throw error, abort
+		delete from PlaceMap2 where pm_id={$this->pm_id} limit 1
+
+Discount: {Discount linked to seat, not with event}
+	Create Discount takes name, value as input
+	DeleteDiscount transaction
+		"SELECT count(*) count from Seat where seat_discount_id=id" > 0 => throw error abort
+		"SELECT count(*) count from `Order` where order_discount_id= id" > 0 => throw error abort
+		delete id from discount
+		
+Seat:
+	Create Seat takes $event_id, $seat_id, $user_id, $price, $discount
+		if(isset($discount)){
+		  $seat->seat_price=$discount->apply_to($price);
+		  $seat->seat_discount_id=$discount->discount_id;
+		}else{
+		  $seat->seat_price=$price;
+		}
+	
+	ReserveSeat transaction $event_id, $seats
+		foreach($seats as $seat_id){
+        $query="SELECT seat_id,seat_pmp_id
+                FROM Seat
+                WHERE seat_event_id= $event_id)
+                AND seat_id= $seat_id)."
+                $status
+                LIMIT 1 FOR UPDATE";} //Acquiring a lock on each row in the seat table
+        foreach($seats as $seat_id){
+		  $query="UPDATE Seat SET
+					seat_old_order_id = seat_order_id,
+					seat_status='res'
+				  WHERE seat_id="$seat_id; //Update the locked seat rows
+				  
+	FreeSeat transaction $event_id, $category_id, $seats
+		foreach($seats as $seat_id){
+			$query="select seat_pmp_id
+					from `Seat`
+			  where seat_id="._esc($seat_id)."
+			  and seat_sid="._esc($sid)."
+			  and seat_status='res'
+			  and seat_event_id="._esc($event_id)."
+			  and seat_category_id="._esc($category_id)."
+			  FOR UPDATE"; 			//Acquiring lock on each of the rows in the seat table
+
+			$query="UPDATE `Seat`
+					set seat_status='free',
+					seat_ts=NULL,
+					seat_sid=NULL
+					where seat_id="._esc($seat_id)."
+					and seat_sid="._esc($sid)."
+					and seat_status='res'
+					and seat_event_id="._esc($event_id)."
+					and seat_category_id="._esc($category_id); //Updating the locked rows
+				  
+	CancelSeat transaction $seats, $user_id
+		foreach($seats as $seat){
+		  $query="UPDATE `Seat` set seat_status='free',
+						seat_user_id=NULL,
+						seat_order_id=NULL,
+						seat_price=NULL,
+						seat_discount_id=NULL,
+				  where seat_id="._esc($seat['seat_id'])."
+				  and seat_event_id="._esc($seat['event_id'])."
+				  
+Order:
+	CreateOrder transaction $user_id
+		Get discount information & calculate price of order
+	
+	DeleteOrder transaction $order_id
+		$query="SELECT *
+              FROM `Seat`
+              WHERE seat_order_id="._esc($order_id)." FOR UPDATE" // Acquire lock on rows in Seat table
+        
+        $query="SELECT *
+              FROM `Order`
+              WHERE order_id="._esc($order_id)." FOR UPDATE";//Acquire lock on order table
+              
+        Checks to see if the order has already been canceled.
+        Cancel all the seats in the order {Happens inside a transaction}
+        Set order_status to cancel
+		
+	
+
+     

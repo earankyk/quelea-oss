@@ -1,0 +1,60 @@
+Name:           Quelea
+Version:        0.0.1
+Cabal-Version:  >= 1.2
+License:        BSD3
+License-File:   LICENSE
+Author:         KC Sivaramakrishnan
+Category:       Experimental
+Synopsis:       Programming with eventually consistent memory on top of Cassandra.
+build-type:     Simple
+
+Library
+  Build-Depends:
+    cassandra-cql >= 0.5.0.1  && < 1,
+    base,
+    bytestring,
+    zeromq4-haskell,
+    cereal,
+    containers,
+    lens,
+    template-haskell,
+    z3 >= 4.0.0,
+    mtl,
+    random,
+    uuid,
+    text,
+    transformers,
+    time,
+    unix,
+    directory,
+    tuple,
+    derive,
+    process,
+    optparse-applicative
+  Exposed-modules:
+    Quelea.NameService.Types
+    Quelea.NameService.SimpleBroker
+    Quelea.NameService.LoadBalancingBroker
+    Quelea.Marshall
+    Quelea.Shim
+    Quelea.Client
+    Quelea.ClientMonad
+    Quelea.Types
+    Quelea.TH
+    Quelea.Contract
+    Quelea.DBDriver
+  Other-modules:
+    Quelea.Contract.Language
+    Quelea.Contract.TypeCheck
+    Quelea.Consts
+    Quelea.ShimLayer.Types
+    Quelea.ShimLayer.Cache
+    Quelea.ShimLayer.UpdateFetcher
+    Quelea.ShimLayer.GC
+  Extensions: CPP
+  ghc-options: -w -O2 -threaded
+
+-- Executable LWW_txn
+-- main-is:
+--    LWW_txn.hs
+--  ghc-options: -prof -XCPP -O2 -threaded -osuf p_o -hisuf p_hi -fprof-auto "-with-rtsopts=-N -p -s -h -i0.1"
