@@ -41,7 +41,8 @@ mkGenOp :: (Effectish eff, Serialize arg, Serialize res)
         => OpFun eff arg res
         -> ([eff] -> [eff])
         -> (GenOpFun, GenSumFun)
-mkGenOp foo bar = trace ("1") (fun1 foo, mkGenSum bar)
+mkGenOp foo bar = (fun1 foo, mkGenSum bar)
+--trace () 
   where
     fun1 foo ctxt arg =
       let ctxt2 = rights $ map decode ctxt

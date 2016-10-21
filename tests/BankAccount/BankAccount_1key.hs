@@ -169,6 +169,7 @@ run args = do
     Daemon -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ createTable tableName
+      runCas pool $ createReservationTable
       progName <- getExecutablePath
       putStrLn "Driver : Starting broker"
       b <- runCommand $ progName ++ " +RTS " ++ (rtsArgs args)
@@ -193,6 +194,7 @@ run args = do
       -- Woken up..
       mapM_ terminateProcess [b,s,c]
       runCas pool $ dropTable tableName
+      runCas pool $ dropReservationTable
     Drop -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ dropTable tableName

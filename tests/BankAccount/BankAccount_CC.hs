@@ -181,6 +181,7 @@ run args = do
     Daemon -> do
       pool <- newPool [("127.0.0.1","9042"), ("127.0.0.2","9042"), ("127.0.0.3","9042")] keyspace Nothing
       runCas pool $ createTable tableName
+      runCas pool $ createReservationTable
       progName <- getExecutablePath
       putStrLn "Driver : Starting broker"
       b <- runCommand $ progName ++ " +RTS " ++ (rtsArgs args)
@@ -205,14 +206,17 @@ run args = do
       -- Woken up..
       mapM_ terminateProcess [b,s,c]
       runCas pool $ dropTable tableName
+      runCas pool $ dropReservationTable
     Drop -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ dropTable tableName
+      runCas pool $ dropReservationTable
 
 reportSignal :: Pool -> [ProcessHandle] -> ThreadId -> IO ()
 reportSignal pool procList mainTid = do
   mapM_ terminateProcess procList
   runCas pool $ dropTable tableName
+  runCas pool $ dropReservationTable
   killThread mainTid
 
 clientCore :: Args -> Int -> UTCTime -- default arguments

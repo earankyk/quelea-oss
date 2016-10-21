@@ -56,7 +56,6 @@ clientJoin f = do
 
 serverJoin :: Backend -> String {- ip -} -> Int {- Port# -} -> IO ()
 serverJoin b ip port = do
-  putStrLn "a Server Joined"
   void $ forkIO $ runZMQ $ do
     liftIO $ debugPrint "serverJoin(5)"
     {- Create a router and a dealer -}
@@ -72,6 +71,8 @@ serverJoin b ip port = do
     liftIO $ debugPrint "serverJoin(6): starting proxy"
     {- Start proxy to distribute requests to workers -}
     proxy routerSock dealerSock Nothing
+
+  putStrLn $ "A Server Joined at " ++ show ip ++ show port
 
   {- Fork a daemon thread that joins with the backend. The daemon shares the
    - servers address for every client request. The client then joins with the
