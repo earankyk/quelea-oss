@@ -49,9 +49,14 @@ data CacheManager = CacheManager {
   _hotLocsMVar      :: HotLocs,
   _semMVar          :: Semaphore,
   _semMVar1         :: Semaphore,
+  _semMVar2         :: Semaphore,
   _blockedMVar      :: ThreadQueue,
   _pool             :: Pool,
   _shimId           :: MVar ShimID,
   _opCount          :: MVar SeqNo,
-  _inMemVClock      :: MVar InMemoryVC
+  _kBoundedOpsCount :: MVar SeqNo,
+  _inMemVClock      :: MVar InMemoryVC,
+  _boundMVar        :: Semaphore,
+  _kBound           :: MVar SeqNo,
+  _objectTypes      :: MVar (S.Set ObjType)
 }

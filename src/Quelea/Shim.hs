@@ -16,9 +16,11 @@ import Quelea.Marshall
 import Quelea.DBDriver
 import Quelea.ShimLayer.Cache
 import Quelea.ShimLayer.GC
+import Quelea.ShimLayer.Types
 import Quelea.Contract.Language
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
 import Data.Serialize
 import Control.Applicative ((<$>))
 import Control.Monad (forever, replicateM, when)
@@ -44,6 +46,7 @@ import Data.Tuple.Select
 makeLenses ''Addr
 makeLenses ''DatatypeLibrary
 makeLenses ''OperationPayload
+makeLenses ''CacheManager
 
 #define DEBUG
 
@@ -63,17 +66,18 @@ runShimNodeWithOpts :: OperationClass a
                     -> [Server] -> Keyspace -- Cassandra connection info
                     -> NameService
                     -> ShimID
+                    -> SeqNo
+                    -> [ObjType]
                     -> IO ()
-runShimNodeWithOpts gcSetting fetchUpdateInterval dtLib serverList keyspace ns shimId = do
+runShimNodeWithOpts gcSetting fetchUpdateInterval dtLib serverList keyspace ns shimId kBound objTypes = do
   pidshim <- getProcessID 
-  Prelude.putStr $ "Shim #" ++ show shimId ++ " initialized"  ++ " --- Accessing servers@"  
-  print serverList
   {- Connection to the Cassandra deployment -}
   pool <- newPool serverList keyspace Nothing
   {- Spawn cache manager -}
-  cache <- initCacheManager pool fetchUpdateInterval shimId
+  cache <- initCacheManager pool fetchUpdateInterval shimId kBound objTypes
   {- Spawn a pool of workers -}
   replicateM cNUM_WORKERS (forkIO $ worker dtLib pool cache gcSetting shimId)
+  --putStrLn $ "Shim #" ++ show shimId ++ " initialized"  ++ " --- Accessing servers@" ++ show serverList
   case gcSetting of
     No_GC -> getServerJoin ns
     GC_Mem_Only -> getServerJoin ns
@@ -88,8 +92,10 @@ runShimNode :: OperationClass a
             -> [Server] -> Keyspace -- Cassandra connection info
             -> NameService
             -> ShimID
+            -> SeqNo
+            -> [ObjType]
             -> IO ()
-runShimNode = runShimNodeWithOpts No_GC cCACHE_THREAD_DELAY
+runShimNode = runShimNodeWithOpts GC_Full cCACHE_THREAD_DELAY
 
 -- Function worker does a write
 worker :: OperationClass a => DatatypeLibrary a -> Pool -> CacheManager -> GCSetting -> ShimID -> IO ()
@@ -100,7 +106,7 @@ worker dtLib pool cache gcSetting shimId = do
   -- debugPrint "worker: connecting..."
   -- Connecting to process id of shim?
   ZMQ.connect sock $ "ipc:///tmp/quelea/" ++ show pid
-  -- debugPrint "worker: connected"
+  --debugPrint ("worker: connected for Shim #" ++ show shimId)
   {- loop forver servicing clients -}
   forever $ do
     binReq <- ZMQ.receive sock
@@ -179,7 +185,10 @@ worker dtLib pool cache gcSetting shimId = do
 doOp :: OperationClass a => GenOpFun -> CacheManager -> OperationPayload a -> Consistency -> IO (Response, Int)
 doOp op cache request const = do
   let (OperationPayload objType key operName arg sessid seqno mbtxid getDeps) = request
-  -- Build the context
+  --seqnoList <- getCollumnByShimId cache
+  --shimId <- readMVar $ cache^.shimId
+  --if (seqnoList !! shimId) < (Prelude.minimum seqnoList) + cK_BOUND then do
+    -- Build the context
   (ctxt, deps) <- buildContext objType key mbtxid
   -- Perform the operation on this context
   -- debugPrint $ "doOp: length of context = " ++ show (Prelude.length ctxt)
@@ -188,7 +197,9 @@ doOp op cache request const = do
   addHotLocation cache objType key
   let resDeps = if getDeps then deps else S.empty
   result <- case effM of
-    Nothing -> return $ ResOper seqno res Nothing Nothing resDeps
+    Nothing -> --do
+      --updateInMemVC cache
+      return $ ResOper seqno res Nothing Nothing resDeps
     Just eff -> do
       -- Write effect writes to DB, and potentially to cache
       writeEffect cache objType key (Addr sessid (seqno+1)) eff deps const $ sel1 <$> mbtxid
@@ -200,6 +211,9 @@ doOp op cache request const = do
         otherwise -> return $ ResOper (seqno + 1) res (Just eff) Nothing resDeps
   -- return response
   return (result, Prelude.length ctxt)
+  --else do
+  --  waitForCacheRefresh cache objType key
+  --  doOp op cache request const
   where
     buildContext ot k Nothing = getContext cache ot k
     buildContext ot k (Just (_, RC_TxnPl l)) = do
@@ -216,6 +230,34 @@ doOp op cache request const = do
     buildContext ot k (Just (_,RR_TxnPl effSet)) = return $
       S.foldl (\(el,as) (addr, eff) -> (eff:el, S.insert addr as))
               ([], S.empty) effSet
+
+updateInMemVC :: CacheManager -> IO ()
+updateInMemVC cm = do
+  inMemClock <- takeMVar $ cm^.inMemVClock
+  shimId <- readMVar $ cm^.shimId
+  let rshimId = shimId
+  counter_val <- takeMVar $ cm^.opCount
+  putMVar (cm^.opCount) (counter_val + 1)
+  let counter_val = counter_val + 1
+  let Just seqnoList = M.lookup shimId inMemClock
+  if seqnoList !! rshimId < counter_val then do
+    putMVar (cm^.inMemVClock) $ M.insert shimId (replaceNth rshimId counter_val seqnoList) inMemClock
+  else do
+    putMVar (cm^.inMemVClock) inMemClock
+  where
+    replaceNth n newVal (x:xs)
+         | n == 0 = newVal:xs
+         | otherwise = x:replaceNth (n-1) newVal xs
+
+getCollumnByShimId :: CacheManager -> IO [SeqNo]
+getCollumnByShimId cm = do
+  inMemClock <- readMVar $ cm^.inMemVClock
+  shimId <- readMVar $ cm^.shimId
+  let seqnoLists = map snd $ M.toList inMemClock
+  return $ map (f shimId) seqnoLists 
+  where
+    f :: ShimID -> [SeqNo] -> SeqNo
+    f shimId seqnoList = seqnoList !! shimId
 
 
 mkDtLib :: OperationClass a => [(a, (GenOpFun, GenSumFun), Availability)] -> DatatypeLibrary a

@@ -5,6 +5,7 @@ module Quelea.DBDriver (
   TableName(..),
   ReadRow,
   ReservationRow,
+  ObjectKeyRow,
 
   createTable,
   dropTable,
@@ -17,6 +18,8 @@ module Quelea.DBDriver (
   cqlInsert,
   -- cqlInsertWithTime,
   cqlDelete,
+
+  cqlReadObjectKeys,
 
   createReservationTable,
   dropReservationTable,
@@ -66,7 +69,9 @@ type TableName = String
 type ReadRow = (SessID, SeqNo, S.Set Addr, Cell, Maybe TxnID, ShimID, SeqNo)
 type ReadRowInternal = (UUID, SeqNo, Deps, Cell, Maybe UUID, ShimID, SeqNo)
 
-type ReservationRow = (ShimID, SeqNo, SeqNo, SeqNo)
+type ObjectKeyRow = (Key, ShimID, SeqNo)
+
+type ReservationRow = (ShimID, [SeqNo])
 
 type ReadRowWithTime = (SessID, SeqNo, UTCTime, S.Set Addr, Cell, Maybe TxnID, ShimID, SeqNo)
 type ReadRowWithTimeInternal = (UUID, SeqNo, UTCTime, Deps, Cell, Maybe UUID, ShimID, SeqNo)
@@ -97,6 +102,9 @@ mkDelete tname = query $ pack $ "delete from " ++ tname ++ " where objid = ? and
 
 mkRead :: TableName -> Query Rows (Key) ReadRowInternal
 mkRead tname = query $ pack $ "select sessid, seqno, deps, value, txnid, shimid, rseqno from " ++ tname ++ " where objid = ?"
+
+mkReadObjectKeys :: TableName -> Query Rows () ObjectKeyRow
+mkReadObjectKeys tname = query $ pack $ "select objid, shimid, rseqno from " ++ tname
 
 mkReadAfterTime :: TableName -> Query Rows (Key,UTCTime) ReadRowInternal
 mkReadAfterTime tname = query $ pack $ "select sessid, seqno, deps, value, txnid, shimid, rseqno from " ++ tname ++ " where objid = ? and addedat > ?"
@@ -138,7 +146,7 @@ mkGCLockUpdate tname = query $ pack $ "update " ++ tname ++ "_GC_LOCK set sessid
 ------------------------------------------------------------------------------
 
 mkCreateReservationTable :: Query Schema () ()
-mkCreateReservationTable = query $ pack $ "create table RESERVATION (shimid int, r1seqno bigint, r2seqno bigint, r3seqno bigint, primary key (shimid))"
+mkCreateReservationTable = query $ pack $ "create table RESERVATION (shimid int, rseqnos list<bigint>, primary key (shimid))"
 
 mkDropReservationTable :: Query Schema () ()
 mkDropReservationTable = query $ pack $ "drop table RESERVATION"
@@ -146,9 +154,8 @@ mkDropReservationTable = query $ pack $ "drop table RESERVATION"
 mkReservationRead :: Query Rows () ReservationRow
 mkReservationRead = query $ pack $ "select * from RESERVATION"
 
-mkReservationUpdate :: Query Write (SeqNo, SeqNo, SeqNo, ShimID) ()
-mkReservationUpdate = query $ pack $ "update RESERVATION set r1seqno = ?, r2seqno = ?, r3seqno = ? where shimid = ?"
-
+mkReservationUpdate :: Query Write ([SeqNo], ShimID) ()
+mkReservationUpdate = query $ pack $ "update RESERVATION set rseqnos = ? where shimid = ?"
 -------------------------------------------------------------------------------
 
 mkCreateTxnTable :: Query Schema () ()
@@ -188,6 +195,11 @@ cqlRead :: TableName -> Consistency -> Key -> Cas [ReadRow]
 cqlRead tname c k = do
   rows <- executeRows c (mkRead tname) k
   return $ map (\(sid, sqn, Deps deps, val, txid, shimId, rseqno) -> (SessID sid, sqn, deps, val, TxnID <$> txid, shimId, rseqno)) rows
+
+cqlReadObjectKeys :: TableName -> Cas [ObjectKeyRow]
+cqlReadObjectKeys tname = do
+  rows <- executeRows ONE (mkReadObjectKeys tname) ()
+  return rows
 
 cqlReadAfterTimeWithTime :: TableName -> Consistency -> Key -> UTCTime -> Cas [ReadRowWithTime]
 cqlReadAfterTimeWithTime tname c k gcTime = do
@@ -229,8 +241,8 @@ cqlReservationRead = do
   return rows
 
 cqlReservationUpdate :: ReservationRow -> Cas ()
-cqlReservationUpdate (shimId, r1seqno, r2seqno, r3seqno) = do
-  executeWrite ONE mkReservationUpdate (r1seqno, r2seqno, r3seqno, shimId)
+cqlReservationUpdate (shimId, rseqnos) = do
+  executeWrite ONE mkReservationUpdate (rseqnos, shimId)
 
 createTxnTable :: Cas ()
 createTxnTable = liftIO . print =<< executeSchema ALL mkCreateTxnTable ()
@@ -292,11 +304,11 @@ releaseLock tname k (SessID sid) pool = runCas pool $ do
 
 tryGetGCLock :: TableName -> Key -> SessID -> Bool {- tryInsert -} -> Cas Bool
 tryGetGCLock tname k (SessID sid) True = do
-  res <- executeTrans (mkGCLockInsert tname) (k, sid)
+  res <- executeTrans (mkGCLockInsert tname) (k, sid) --ALL
   if res then return True
   else tryGetGCLock tname k (SessID sid) False
 tryGetGCLock tname k (SessID sid) False = do
-  res <- executeTrans (mkGCLockUpdate tname) (sid, k, knownUUID)
+  res <- executeTrans (mkGCLockUpdate tname) (sid, k, knownUUID) --ALL
   if res then return True
   else do
     liftIO $ threadDelay cLOCK_DELAY
@@ -309,7 +321,7 @@ getGCLock tname k sid pool = runCas pool $ do
 
 releaseGCLock :: TableName -> Key -> SessID -> Pool -> IO ()
 releaseGCLock tname k (SessID sid) pool = runCas pool $ do
-  res <- executeTrans (mkGCLockUpdate tname) (knownUUID, k, sid)
+  res <- executeTrans (mkGCLockUpdate tname) (knownUUID, k, sid) --ALL
   if res then return ()
   else error $ "releaseGCLock : key=" ++ show k ++ " sid=" ++ show sid
 
@@ -324,7 +336,7 @@ getGlobalLock :: TxnID -> Pool -> IO ()
 getGlobalLock (TxnID txnid) pool = runCas pool loop
   where
     loop = do
-      success <- executeTrans mkGlobalLockUpdate (txnid, knownUUID, knownUUID)
+      success <- executeTrans mkGlobalLockUpdate (txnid, knownUUID, knownUUID) --ALL
       when (not success) loop
 
 releaseGlobalLock :: TxnID -> Pool -> IO ()

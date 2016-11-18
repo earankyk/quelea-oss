@@ -62,7 +62,9 @@ newPlacemap capacity =
 	atomically (newPlacemapTxnCtrtA) $ do
 		pmid <- liftIO $ PlacemapID <$> randomIO
 		liftIO $ putStrLn $ "Creating new placemap " ++ show pmid
-		r::() <- invoke (mkKey pmid) CreatePlacemap ((), ())
+		eventid <- liftIO $ EventID <$> randomIO
+		seatid <- liftIO $ SeatID <$> randomIO
+		r::() <- invoke (mkKey pmid) CreatePlacemap (eventid, seatid)
 		liftIO $ putStrLn $ "Created new placemap " ++ show pmid
 		seatids <- replicateM (capacity) $ do 
 			seatid <- liftIO $ SeatID <$> randomIO

@@ -22,10 +22,12 @@ import Database.Cassandra.CQL
 import System.Posix.Process
 import Control.Monad.Trans (liftIO)
 import Data.Text (pack)
+import Data.Int
 import Quelea.Types (summarize)
 import Control.Monad (replicateM_, foldM, when, forever)
 import Data.IORef
 import Options.Applicative
+import qualified Data.Map as M
 import Data.Time
 import Control.Concurrent.MVar
 import System.Posix.Signals
@@ -45,10 +47,13 @@ tableName :: String
 tableName = "BankAccount"
 
 numOpsPerRound :: Num a => a
-numOpsPerRound = 3
+numOpsPerRound = 1
 
 printEvery :: Int
-printEvery = 1
+printEvery = 2
+
+bound :: Int
+bound = 1
 
 --------------------------------------------------------------------------------
 
@@ -76,6 +81,8 @@ data Args = Args {
   numThreads :: String,
   -- Delay between client requests in microseconds. Used to control throughput.
   delayReq :: String,
+  -- K-Bound
+  kBound :: String,
   -- Measure latency
   measureLatency :: Bool
 }
@@ -116,6 +123,11 @@ args = Args
      <> metavar "MICROSECS"
      <> help "Delay between client requests"
      <> value "1000")
+  <*> strOption
+      ( long "bound"
+     <> metavar "NUM_OPS"
+     <> help "K-Bound"
+     <> value "3")
   <*> switch
       ( long "measureLatency"
      <> help "Measure operation latency" )
@@ -134,6 +146,7 @@ run args = do
   let k = read $ kind args
   let broker = brokerAddr args
   let delay = read $ delayReq args
+  --putStrLn $ show bound
   someTime <- getCurrentTime
   let ns1 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
                          (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5560
@@ -149,12 +162,12 @@ run args = do
        startBroker (Frontend $ "tcp://*:" ++ show fePort)
                      (Backend $ "tcp://*:" ++ show bePort)
     Server -> do
-       tid1 <- forkIO $ runShimNode dtLib [("127.0.0.1","9042")] keyspace ns1 0
-       tid2 <- forkIO $ runShimNode dtLib [("127.0.0.2","9042")] keyspace ns2 1
-       tid3 <- forkIO $ runShimNode dtLib [("127.0.0.3","9042")] keyspace ns3 2
+       tid1 <- forkIO $ runShimNode dtLib [("127.0.0.1","9042")] keyspace ns1 0 (fromIntegral(bound) :: Int64) [tableName]
+       tid2 <- forkIO $ runShimNode dtLib [("127.0.0.2","9042")] keyspace ns2 1 (fromIntegral(bound) :: Int64) [tableName]
+       tid3 <- forkIO $ runShimNode dtLib [("127.0.0.3","9042")] keyspace ns3 2 (fromIntegral(bound) :: Int64) [tableName]
        threadDelay 300000000
        putStrLn "Server is Shut Down"
-    
+
     Client -> do
       let rounds = read $ numRounds args
       let threads = read $ numThreads args
@@ -165,12 +178,6 @@ run args = do
       replicateM_ threads $ forkIO $ do
         avgLatency <- runSession ns1 $ foldM (clientCore args delay someTime) 0 [1 .. rounds]
         putMVar mv avgLatency
-      replicateM_ threads $ forkIO $ do
-        avgLatency <- runSession ns2 $ foldM (clientCore args delay someTime) 0 [1 .. rounds]
-        putMVar mv avgLatency
-      replicateM_ threads $ forkIO $ do
-        avgLatency <- runSession ns3 $ foldM (clientCore args delay someTime) 0 [1 .. rounds]
-        putMVar mv avgLatency
       totalLat <- foldM (\l _ -> takeMVar mv >>= \newL -> return $ l + newL) 0 [1..threads]
       t2 <- getCurrentTime
       putStrLn $ "Throughput (ops/s) = " ++ (show $ (fromIntegral $ numOpsPerRound * rounds * threads) / (diffUTCTime t2 t1))
@@ -178,6 +185,7 @@ run args = do
     Create -> do
       pool <- newPool [("127.0.0.1","9042")] keyspace Nothing
       runCas pool $ createTable tableName
+      runCas pool $ createReservationTable
     Daemon -> do
       pool <- newPool [("127.0.0.1","9042"), ("127.0.0.2","9042"), ("127.0.0.3","9042")] keyspace Nothing
       runCas pool $ createTable tableName
@@ -222,68 +230,24 @@ reportSignal pool procList mainTid = do
 clientCore :: Args -> Int -> UTCTime -- default arguments
            -> NominalDiffTime -> Int -> CSN NominalDiffTime
 clientCore args delay someTime avgLat round = do
-  --liftIO $ putStrLn  "--------------------------------"
   -- Generate key
-  key <- liftIO $ (mkKey . (\i -> i `mod` (1::Int))) <$> randomIO
+  key <- liftIO $ (mkKey . (\i -> i `mod` (100000::Int))) <$> randomIO
   -- Delay thread if required
   when (delay /= 0) $ liftIO $ threadDelay delay
   -- Perform the operations
   t1 <- getNow args someTime
-  {-liftIO $ putStrLn  "invoking deposit"
-  r::() <- invoke key Deposit (10::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r::() <- invoke key Deposit (9::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (1::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (5::Int) --
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (5::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (5::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r::() <- invoke key Deposit (9::Int) --
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (1::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (5::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r::() <- invoke key Deposit (9::Int) --
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (1::Int)
-  liftIO $ threadDelay 100000
-  liftIO $ putStrLn  "invoking deposit"
-  r :: () <- invoke key Deposit (5::Int)-}
-  
   r::() <- invoke key Deposit (1::Int)
   --liftIO $ putStrLn $ "Deposit : 1"
-  r:: Bool <- invoke key Withdraw (1::Int)
-  --liftIO $ putStrLn $ "Withdraw : 1 :: " ++ show r
-  r :: Int <- invoke key GetBalance ()
-  if r < 0 then do
-    liftIO $ putStrLn $ "Balance : " ++ show r
-  else do 
-    return ()
   t2 <- getNow args someTime
   -- Calculate new latency
   let timeDiff = diffUTCTime t2 t1
   let newAvgLat = ((timeDiff / numOpsPerRound) + (avgLat * (fromIntegral $ round - 1))) / (fromIntegral round)
   -- Print info if required
-  --when (round `mod` printEvery == 0) $ do
-  --  liftIO . putStrLn $ "Round = " ++ show round ++ " result = " ++ show r
-  --                      ++ if (measureLatency args)
-  --                         then " latency = " ++ show newAvgLat
-  --                          else ""
+  when (round `mod` printEvery == 0) $ do
+    liftIO . putStrLn $ "Round = " ++ show round ++ " result = " ++ show r
+                        ++ if (measureLatency args)
+                           then " latency = " ++ show newAvgLat
+                           else ""
   return newAvgLat
 
 getNow :: Args -> UTCTime -> CSN UTCTime

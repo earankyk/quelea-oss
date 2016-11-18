@@ -96,7 +96,9 @@ beginSession :: NameService -> IO Session
 beginSession ns = beginSessionStats ns False
 
 endSession :: Session -> IO ()
-endSession s = disconnect (s ^. server) (s^.serverAddr)
+endSession s = do 
+  --putStrLn "Ending Session"
+  disconnect (s ^. server) (s^.serverAddr)
 
 beginTxn :: Session -> TxnKind -> IO Session
 beginTxn s tk = do
@@ -152,10 +154,10 @@ invokeInternal getDeps s key operName arg = do
   let txnReq = mkTxnReq ot key $ s^.curTxn
   let req = encode $ ReqOper $ OperationPayload ot key operName (encode arg)
                         (s ^. sessid) seqNo txnReq getDeps
-  -- putStrLn $ "invokeInternal: req length=" ++ show (B.length req)
+  --putStrLn $ "invokeInternal: req length=" ++ show (B.length req)
   send (s^.server) [] req
   responseBlob <- receive (s^.server)
-  -- putStrLn $ "invokedInternal: res length=" ++ show (B.length responseBlob)
+  --putStrLn $ "invokedInternal: res length=" ++ show (B.length responseBlob)
   let (ResOper newSeqNo resBlob mbNewEff mbTxns visAddrSet) = decodeResponse responseBlob
   let visSet = S.map (\(Addr sid sqn) -> TxnDep ot key sid sqn) visAddrSet
   case decode resBlob of

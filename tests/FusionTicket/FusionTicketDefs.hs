@@ -537,7 +537,6 @@ getCartSummaryCtrt x = forallQ_ [AddOrdersToCart, RemoveOrdersFromCart] $ \a -> 
 createTables :: Cas ()
 createTables = do
   createTxnTable
-  createReservationTable
   createTable "EventEffect"
   createTable "PlacemapEffect"
   createTable "DiscountEffect"
@@ -549,7 +548,6 @@ createTables = do
 dropTables :: Cas ()
 dropTables = do
   dropTxnTable
-  dropReservationTable
   dropTable "EventEffect"
   dropTable "PlacemapEffect"
   dropTable "DiscountEffect"

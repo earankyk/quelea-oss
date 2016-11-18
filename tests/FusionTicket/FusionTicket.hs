@@ -26,6 +26,8 @@ import Control.Exception ( SomeException(..), AsyncException(..) , catch, handle
 import Data.IORef
 import Data.Text (pack)
 import Data.Time
+import Data.Int
+import qualified Data.Map as M
 import Database.Cassandra.CQL
 import Options.Applicative
 import System.Environment (getExecutablePath, getArgs)
@@ -59,6 +61,9 @@ fePort = 5558
 
 bePort :: Int
 bePort = 5559
+
+bound :: Int
+bound = 15
 
 --------------------------------------------------------------------------------
 
@@ -215,15 +220,28 @@ run :: Args -> IO ()
 run args = do
   let k = read $ kind args
   let broker = brokerAddr args
-  let ns = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
+
+  let ns1 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
                          (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5560
+
+  let ns2 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
+                         (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5561 
+
+  let ns3 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
+                         (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5562
+  
   case k of
     Broker -> startBroker (Frontend $ "tcp://*:" ++ show fePort)
                      (Backend $ "tcp://*:" ++ show bePort)
     Server -> do
-      runShimNode dtLib [("localhost","9042")] keyspace ns 0
+      cacheMap <- newMVar M.empty
+      tid1 <- forkIO $ runShimNode dtLib [("127.0.0.1","9042")] keyspace ns1 0 cacheMap (fromIntegral(bound) :: Int64)
+      tid2 <- forkIO $ runShimNode dtLib [("127.0.0.2","9042")] keyspace ns2 1 cacheMap (fromIntegral(bound) :: Int64)
+      tid3 <- forkIO $ runShimNode dtLib [("127.0.0.3","9042")] keyspace ns3 2 cacheMap (fromIntegral(bound) :: Int64)
+      threadDelay 300000000
+      putStrLn "Server is Shut Down"
     Client -> do
-      runSession ns $ do 
+      runSession ns1 $ do 
         (pmid, seatids) <- newPlacemap 10000
         --eventid <- newEvent pmid "sample-name" "sample.com" (UTCTime (fromGregorian 2016 12 16) 0) 10000 10 2
         key <- liftIO $ randomIO
@@ -237,9 +255,11 @@ run args = do
     Create -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ createTables
+      runCas pool $ createReservationTable
     Daemon -> do
-      pool <- newPool [("localhost","9042")] keyspace Nothing
+      pool <- newPool [("127.0.0.1","9042"), ("127.0.0.2","9042"), ("127.0.0.3","9042")] keyspace Nothing
       runCas pool $ createTables
+      runCas pool $ createReservationTable
       progName <- getExecutablePath
       b <- runCommand $ progName ++ " +RTS " ++ (rtsArgs args)
                         ++ " -RTS --kind Broker --brokerAddr " ++ broker
@@ -256,9 +276,11 @@ run args = do
       -- Woken up..
       mapM_ terminateProcess [b,s,c]
       runCas pool $ dropTables
+      runCas pool $ dropReservationTable
     Drop -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ dropTables
+      runCas pool $ dropReservationTable
 
 main :: IO ()
 main = execParser opts >>= run
@@ -272,4 +294,5 @@ reportSignal :: Pool -> [ProcessHandle] -> ThreadId -> IO ()
 reportSignal pool procList mainTid = do
   mapM_ terminateProcess procList
   runCas pool $ dropTables
+  runCas pool $ dropReservationTable
   killThread mainTid

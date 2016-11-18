@@ -1,11 +1,12 @@
-EXE=BankAccount_Q BankAccount_SC BankAccount_CC BankAccount_EC BankAccount_1key
+EXE=BankAccount_CC BankAccount_EC
+#EXE=BankAccount_Q BankAccount_SC BankAccount_CC BankAccount_EC BankAccount_1key
 SCRIPTS:=$(shell cqlsh -f ../create_keyspace.cql)
 BROKER=
 
 all: $(EXE) $(SCRIPTS)
 
-BankAccount_Q: BankAccount_Q.hs
-	ghc $(BROKER) -rtsopts -threaded BankAccount_Q.hs
+#BankAccount_Q: BankAccount_Q.hs
+#	ghc $(BROKER) -rtsopts -threaded BankAccount_Q.hs
 
 BankAccount_EC: BankAccount_EC.hs
 	ghc $(BROKER) -threaded BankAccount_EC.hs
@@ -13,11 +14,11 @@ BankAccount_EC: BankAccount_EC.hs
 BankAccount_CC: BankAccount_CC.hs
 	ghc $(BROKER) -threaded BankAccount_CC.hs
 
-BankAccount_SC: BankAccount_SC.hs
-	ghc $(BROKER) -threaded BankAccount_SC.hs
+#BankAccount_SC: BankAccount_SC.hs
+#	ghc $(BROKER) -threaded BankAccount_SC.hs
 
-BankAccount_1key: BankAccount_1key.hs
-	ghc $(BROKER) -threaded BankAccount_1key.hs
+#BankAccount_1key: BankAccount_1key.hs
+#	ghc $(BROKER) -threaded BankAccount_1key.hs
 
 clean:
 	rm -f *.dyn* *~ *.hi *.o $(EXE)

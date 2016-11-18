@@ -21,11 +21,13 @@ import Quelea.TH
 import Database.Cassandra.CQL
 import Control.Monad.Trans (liftIO)
 import Data.Text (pack)
+import Data.Int
 import Quelea.Types (summarize)
 import Control.Monad (replicateM_, foldM, when, forever)
 import Data.IORef
 import Options.Applicative
 import Data.Time
+import qualified Data.Map as M
 import Control.Concurrent.MVar
 import System.Posix.Signals
 import Control.Exception ( SomeException(..), AsyncException(..) , catch, handle, throw)
@@ -45,11 +47,13 @@ tableName :: String
 tableName = "BankAccount"
 
 numOpsPerRound :: Num a => a
-numOpsPerRound = 3
+numOpsPerRound = 1
 
 printEvery :: Int
-printEvery = 100
+printEvery = 2
 
+bound :: Int
+bound = 15
 --------------------------------------------------------------------------------
 
 data Kind = Broker | Client | Server
@@ -135,13 +139,27 @@ run args = do
   let broker = brokerAddr args
   let delay = read $ delayReq args
   someTime <- getCurrentTime
-  let ns = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
+  --let ns = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
+  --                       (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5560
+  let ns1 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
                          (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5560
+
+  let ns2 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
+                         (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5561 
+
+  let ns3 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
+                         (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5562
+
+
   case k of
     Broker -> startBroker (Frontend $ "tcp://*:" ++ show fePort)
                      (Backend $ "tcp://*:" ++ show bePort)
     Server -> do
-      runShimNode dtLib [("localhost","9042")] keyspace ns 0
+      tid1 <- forkIO $ runShimNode dtLib [("127.0.0.1","9042")] keyspace ns1 0 (fromIntegral(bound) :: Int64) [tableName]
+      tid2 <- forkIO $ runShimNode dtLib [("127.0.0.2","9042")] keyspace ns2 1 (fromIntegral(bound) :: Int64) [tableName]
+      tid3 <- forkIO $ runShimNode dtLib [("127.0.0.3","9042")] keyspace ns3 2 (fromIntegral(bound) :: Int64) [tableName]
+      threadDelay 300000000
+      putStrLn "Server is Shut Down"
     Client -> do
       let rounds = read $ numRounds args
       let threads = read $ numThreads args
@@ -150,7 +168,7 @@ run args = do
 
       t1 <- getCurrentTime
       replicateM_ threads $ forkIO $ do
-        avgLatency <- runSession ns $ foldM (clientCore args delay someTime) 0 [1 .. rounds]
+        avgLatency <- runSession ns1 $ foldM (clientCore args delay someTime) 0 [1 .. rounds]
         putMVar mv avgLatency
       totalLat <- foldM (\l _ -> takeMVar mv >>= \newL -> return $ l + newL) 0 [1..threads]
       t2 <- getCurrentTime
@@ -159,9 +177,11 @@ run args = do
     Create -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ createTable tableName
+      runCas pool $ createReservationTable
     Daemon -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ createTable tableName
+      runCas pool $ createReservationTable
       progName <- getExecutablePath
       putStrLn "Driver : Starting broker"
       b <- runCommand $ progName ++ " +RTS " ++ (rtsArgs args)
@@ -185,14 +205,17 @@ run args = do
       -- Woken up..
       mapM_ terminateProcess [b,s,c]
       runCas pool $ dropTable tableName
+      runCas pool $ dropReservationTable
     Drop -> do
       pool <- newPool [("localhost","9042")] keyspace Nothing
       runCas pool $ dropTable tableName
+      runCas pool $ dropReservationTable
 
 reportSignal :: Pool -> [ProcessHandle] -> ThreadId -> IO ()
 reportSignal pool procList mainTid = do
   mapM_ terminateProcess procList
   runCas pool $ dropTable tableName
+  runCas pool $ dropReservationTable
   killThread mainTid
 
 clientCore :: Args -> Int -> UTCTime -- default arguments
@@ -205,8 +228,8 @@ clientCore args delay someTime avgLat round = do
   -- Perform the operations
   t1 <- getNow args someTime
   r::() <- invoke key Deposit (2::Int)
-  r::() <- invoke key Withdraw (1::Int)
-  r :: Int <- invoke key GetBalance ()
+  {-r::() <- invoke key Withdraw (1::Int)
+  r :: Int <- invoke key GetBalance ()-}
   t2 <- getNow args someTime
   -- Calculate new latency
   let timeDiff = diffUTCTime t2 t1

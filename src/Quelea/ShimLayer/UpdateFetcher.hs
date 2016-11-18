@@ -14,12 +14,15 @@ import Control.Monad.Trans (liftIO)
 import Control.Monad (mapM_, when, foldM)
 import Data.ByteString (empty)
 import Data.Maybe (fromJust)
+import Data.List
 import Control.Concurrent (myThreadId)
+import Control.Arrow (second)
 import Debug.Trace
 import System.IO (hFlush, stdout)
 import System.Posix.Process (getProcessID)
 import Data.Tuple.Select
 import Data.Time
+import Data.Int
 
 import Quelea.Consts
 import Quelea.Types
@@ -80,6 +83,7 @@ makeLenses ''CacheUpdateState
 
 fetchUpdates :: CacheManager -> Consistency -> [(ObjType, Key)] -> IO ()
 fetchUpdates cm const todoList = do
+  shimid <- readMVar $ cm^.shimId
   -- Recursively read the DB and collect all the rows
   !cursor <- readMVar $ cm^.cursorMVar
   !inclTxns <- readMVar $ cm^.includedTxnsMVar
@@ -89,10 +93,35 @@ fetchUpdates cm const todoList = do
   let crs = CollectRowsState (sel1 inclTxns) todoObjsCRS M.empty M.empty
   CollectRowsState _ _ !rowsMapCRS !newTransMap <- execStateT (collectTransitiveRows (cm^.pool) const lgctMap) crs
 
+  --putStrLn $ "Initial : " ++ show (M.size rowsMapCRS)
+
+  vc <- takeMVar $ cm^.inMemVClock
+  let Just seqNoList = M.lookup shimid vc
+  let shimOpList = map (\(sid,sqn,deps,val,mbTxid,rshimid,rseqno) -> (rshimid, rseqno)) (foldl (++) [] $ map snd $ M.toList rowsMapCRS)
+  let shimOpMap = convertKVList shimOpList
+  let highestOpMap = M.foldlWithKey (\highestOpMap1 rshimId list -> 
+          M.insert rshimId (processSeqNoList list (seqNoList !! rshimId) shimid rshimId) highestOpMap1) M.empty shimOpMap
+  let newVc = M.foldlWithKey (\vc rshimid highestOp -> 
+          if rshimid /= shimid then
+            updateInMemVC rshimid highestOp vc shimid
+          else vc) vc highestOpMap 
+  let y = M.foldlWithKey (\gcmm (ot,k) rowList ->
+          let gcm = foldl (\gcm x@(_,_,_,_,_,rshimid,rseqno) ->
+                  if rshimid /= shimid then
+                    let Just highestOp = M.lookup rshimid highestOpMap in
+                    if rseqno <= highestOp then x:gcm else gcm
+                  else x:gcm) [] rowList
+          in M.insert (ot,k) gcm gcmm) M.empty rowsMapCRS
+  let !rowsMapCRS = y
+  putMVar (cm^.inMemVClock) newVc
+  --putStrLn $ "Final : " ++ show (M.size y)
+
   -- Update disk row count for later use by gcDB
   drc <- takeMVar $ cm^.diskRowCntMVar
   let newDrc = M.foldlWithKey (\iDrc (ot,k) rows -> M.insert (ot,k) (length rows) iDrc) drc rowsMapCRS
   putMVar (cm^.diskRowCntMVar) newDrc
+
+  --putStrLn $ "Fetched " ++ show (length $ M.toList rowsMapCRS) ++" updates on Shim # " ++ show shimid
 
   -- First collect the GC markers
   let gcMarkerMap = M.foldlWithKey (\gcmm (ot,k) rowList ->
@@ -140,6 +169,20 @@ fetchUpdates cm const todoList = do
                   GCMarker _ -> er) M.empty rowList
          in M.insert (ot,k) er erm) M.empty rowsMapCRS
 
+  {--- Update in-memory vector clock
+  shimid <- readMVar $ cm^.shimId
+  --takeMVar $ (cm^.boundMVar)
+  vc <- takeMVar $ cm^.inMemVClock
+  let newVc = M.foldlWithKey (\vc (ot,k) rowList -> 
+                  foldl (\vc (sid,sqn,deps,val,mbTxid,rshimid,rseqno) -> 
+                    case val of
+                      EffectVal bs -> 
+                        if rshimid /= shimid then {-trace ("Shim # "++show shimid++" saw ("++show sid++", "++show sqn++")")-} updateInMemVC rshimid rseqno vc shimid
+                        else vc
+                      otherwise -> vc) vc rowList) vc rowsMapCRS
+  putMVar (cm^.inMemVClock) newVc
+  --putMVar (cm^.boundMVar) ()-}
+
   -- debugPrint $ "newCursor"
   -- mapM_ (\((ot,k), m) -> mapM_ (\(sid,sqn) -> debugPrint $ show $ Addr sid sqn) $ M.toList m) $ M.toList newCursor
 
@@ -163,15 +206,6 @@ fetchUpdates cm const todoList = do
           updateCache ot k filteredSet
             (case M.lookup (ot,k) newCursor of {Nothing -> M.empty; Just m -> m})
             (case M.lookup (ot,k) gcMarkerMap of {Nothing -> error "fetchUpdates(1)"; Just x -> x})) $ M.toList filteredMap
-
-  -- Update in-memory vector clock
-  shimid <- readMVar $ cm^.shimId
-  vc <- takeMVar $ cm^.inMemVClock
-  let newvc = foldl (\vc ((ot,k), filteredSet) -> 
-                  S.foldl (\vc (_,_,rshimid,rseqno,_) -> updateInMemVC rshimid rseqno vc shimid) vc filteredSet) vc $ M.toList filteredMap
-  putMVar (cm^.inMemVClock) newvc
-
-  --debugPrint $ "Updated in-memory vector clock on Shim #" ++ show shimid
 
   let CacheUpdateState !newCache !new2Cursor !newDeps !newLastGCAddr !newLastGCTime !newInclTxns =
         execState core (CacheUpdateState cache cursor deps lastGCAddr lastGCTime inclTxns)
@@ -286,7 +320,12 @@ fetchUpdates cm const todoList = do
                           Nothing -> acc
                           Just txid -> S.insert txid acc) S.empty filteredSet
       let newInclTxns = (S.union inclTxnsSet newTxns, M.insertWith S.union (ot,k) newTxns inclTxnsMap)
-      inclTxnsCUS .= newInclTxns
+      inclTxnsCUS .= newInclTxns 
+
+    sortGT (a1,e1,_,_,_,shimid1,rseqno1) (a2,e2,_,_,_,shimid2,rseqno2)
+        | shimid1 > shimid2 = GT
+        | shimid1 < shimid2 = LT
+        | shimid1 == shimid2 = compare rseqno1 rseqno2
 
     newGCHasOccurred :: Maybe SessID -> Maybe (SessID, SeqNo, S.Set Addr, UTCTime) -> Bool
     newGCHasOccurred Nothing Nothing = False
@@ -294,10 +333,27 @@ fetchUpdates cm const todoList = do
     newGCHasOccurred (Just _) Nothing = error "newGCHasOccurred: unexpected state"
     newGCHasOccurred (Just fromCache) (Just (fromDB,_,_,_)) = fromCache /= fromDB
 
+    convertKVList :: Ord a => [(a, b)] -> M.Map a [b]
+    convertKVList = M.fromListWith (++) . map (second (:[]))
+
+    processSeqNoList :: [SeqNo] -> SeqNo -> ShimID -> ShimID -> SeqNo 
+    processSeqNoList seqNoList1 vcSeqNo shimid rshimid = 
+      let seqNoList = filter (> vcSeqNo) seqNoList1 in
+      let indexList = [(1::Int64)..(fromIntegral(length seqNoList)::Int64)] in
+      let m = take (length seqNoList) $ repeat vcSeqNo in
+      let compareList = zipWith (+) indexList m in
+      let compareTuple = zip compareList (sort seqNoList) in
+      let numberOfEffects = {-trace (show compareTuple ++ "from " ++ show rshimid ++ " on " ++ show shimid)-} length $ takeWhile (\(seqNo1, seqNo2) -> seqNo1 == seqNo2) compareTuple in 
+      if numberOfEffects == 0 then 
+        if length seqNoList /= 0 then 
+          trace ("Missed effect(s) on "++ show shimid) (vcSeqNo) 
+        else vcSeqNo
+      else ((sort seqNoList) !! (numberOfEffects - 1))
+
 updateInMemVC :: ShimID {-Remote ShimID-} -> SeqNo{-New seq no.-} -> InMemoryVC -> ShimID {-ShimID-} -> InMemoryVC
 updateInMemVC rshimId counter_val inMemClock shimId =
-  let Just seqnoList = M.lookup shimId inMemClock in 
-  if seqnoList !! rshimId < counter_val then
+  let Just seqnoList = M.lookup shimId inMemClock in
+  if counter_val > seqnoList !! rshimId then
     M.insert shimId (replaceNth rshimId counter_val seqnoList) inMemClock
   else inMemClock
   where
@@ -403,7 +459,7 @@ collectTransitiveRows pool const lgct = do
                   Just gcTime -> liftIO $ do
                     runCas pool $ cqlReadAfterTime ot const k gcTime
           -- Mark as read
-          rowsMapCRS .= M.insert (ot,k) rows rm
+          rowsMapCRS .= M.insert (ot,k) rows rm 
           mapM_ processRow rows
       collectTransitiveRows pool const lgct
   where

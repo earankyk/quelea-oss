@@ -33,6 +33,7 @@ import Control.Monad.State
 import System.IO
 import Control.Applicative ((<$>))
 import Data.Tuple.Select
+import Data.Time
 
 import Quelea.Types
 import Quelea.ShimLayer.Types
@@ -55,8 +56,8 @@ debugPrint _ = return ()
 #endif
 
 
-initCacheManager :: Pool -> Int -> ShimID -> IO CacheManager
-initCacheManager pool fetchUpdateInterval shimid = do
+initCacheManager :: Pool -> Int -> ShimID -> SeqNo -> [ObjType] -> IO CacheManager
+initCacheManager pool fetchUpdateInterval shimid kBound objTypes = do
   cache <- newMVar M.empty
   cursor <- newMVar M.empty
   nearestDeps <- newMVar M.empty
@@ -68,18 +69,26 @@ initCacheManager pool fetchUpdateInterval shimid = do
   hotLocs <- newMVar S.empty
   sem <- newEmptyMVar
   sem1 <- newEmptyMVar
+  sem2 <- newEmptyMVar
+  boundMVar <- newMVar ()
   blockedList <- newMVar []
   opCount <- newMVar 0
+  kBoundedOpsCount <- newMVar 0
   vc <- initializeVC
   inMemVClock <- newMVar vc
   shimId <- newMVar shimid
+  kBound <- newMVar kBound
+  objectTypes <- newMVar $ S.fromList objTypes
   let cm = CacheManager cache cursor nearestDeps lastGCAddr lastGCTime
-                        seenTxns hwm drc hotLocs sem sem1 blockedList pool 
-                        shimId opCount inMemVClock
+                        seenTxns hwm drc hotLocs sem sem1 sem2 blockedList pool 
+                        shimId opCount kBoundedOpsCount inMemVClock boundMVar 
+                        kBound objectTypes
   forkIO $ cacheMgrCore cm
   forkIO $ vcCronJob cm
+  forkIO $ printReservationStats cm
   forkIO $ signalGenerator sem fetchUpdateInterval
-  forkIO $ signalGenerator sem1 100000
+  forkIO $ signalGenerator sem1 10
+  forkIO $ signalGenerator sem2 10000000
   return $ cm
   where
     signalGenerator semMVar fetchUpdateInterval = forever $ do
@@ -100,24 +109,28 @@ vcCronJob cm = forever $ do
   shimId <- readMVar $ cm^.shimId
   let x = M.lookup shimId inMemClock 
   case x of
-    Just [r1Seqno, r2Seqno, r3Seqno] -> do
-      runCas (cm^.pool) $ cqlReservationUpdate (shimId, r1Seqno, r2Seqno, r3Seqno)
-    otherwise -> return ()--putStrLn $ "Error : vector clock doesn't have entry for ShimID : " ++ show shimId
+    Just rseqnos -> do
+      runCas (cm^.pool) $ cqlReservationUpdate (shimId, rseqnos)
+    otherwise -> return ()
   reservationRows <- runCas (cm^.pool) $ cqlReservationRead
   putMVar (cm^.inMemVClock) $ buildVClockFromTable reservationRows inMemClock
-  inMemClock <- readMVar (cm^.inMemVClock)
-  let collList = getCollumnByShimId shimId inMemClock
-  if (Prelude.maximum collList) - (Prelude.minimum collList) > 10 then do
-    putStrLn $ "----------------------Max Diff : " ++ show ((Prelude.maximum collList) - (Prelude.minimum collList)) ++ "------------------------------------------"
-  else do
-    return ()
- -- no_ops <- readMVar $ cm^.opCount
-  --putStrLn $ "No. of ops on Shim#" ++ show shimId ++ " --> " ++ show no_ops
   where
     buildVClockFromTable :: [ReservationRow] -> InMemoryVC -> InMemoryVC
     buildVClockFromTable reservationRows inMemClock =
-      foldl (\e (shimid, sqn1, sqn2, sqn3) -> 
-                M.insert shimid [sqn1, sqn2, sqn3] e) inMemClock reservationRows
+      foldl (\e (shimid, rseqnos) -> 
+                M.insert shimid rseqnos e) inMemClock reservationRows
+
+printReservationStats :: CacheManager -> IO ()
+printReservationStats cm = forever $ do
+  takeMVar $ cm^.semMVar2
+  shimId <- readMVar $ cm^.shimId
+  no_ops <- readMVar $ cm^.opCount
+  putStrLn $ "************************        No. of ops on Shim #" ++ show shimId ++ " --> " ++ show no_ops ++ "        ************************"
+  inMemClock <- readMVar (cm^.inMemVClock)
+  let collList = getCollumnByShimId shimId inMemClock
+  putStrLn $ "************************        Max Diff on Shim # "++ show shimId ++ " : " ++ show ((Prelude.maximum collList) - (Prelude.minimum collList)) ++ "        ************************"
+  kBoundedCount <- readMVar (cm^.kBoundedOpsCount)
+  putStrLn $ "************************        No. of k-bounded ops on Shim #" ++ show shimId ++ " --> " ++ show kBoundedCount ++ "        ************************"
 
 getInclTxnsAt :: CacheManager -> ObjType -> Key -> IO (S.Set TxnID)
 getInclTxnsAt cm ot k = do
@@ -137,12 +150,34 @@ cacheMgrCore cm = forever $ do
   -- Woken up. Read the current list of hot locations, and empty the MVar.
   locs <- takeMVar $ cm^.hotLocsMVar
   putMVar (cm^.hotLocsMVar) S.empty
+  t1 <- getCurrentTime
+  objTypes <- readMVar $ cm^.objectTypes
+  vc <- readMVar (cm^.inMemVClock)
+  shimId <- readMVar (cm^.shimId)
+  let Just seqNoList = M.lookup shimId vc
+  let shimids = [0..cNUM_REPLICAS]
+  let vcList = Prelude.zip shimids seqNoList
+  let vcMap = M.fromList vcList
+  objKeyList <- foldM (\list ot -> do
+                            objectRows <- runCas (cm^.pool) $ cqlReadObjectKeys ot
+                            return $ list ++ (f (ot, objectRows) vcMap)) [] $ S.toList objTypes
+  let newLocs = S.union locs (S.fromList objKeyList)
   -- Fetch updates
-  fetchUpdates cm ONE $ S.toList locs
+  t2 <- getCurrentTime
+  --putStrLn $ "Reading " ++ show (S.size newLocs) ++" keys took : " ++ show (diffUTCTime t2 t1)
+  fetchUpdates cm ONE $ S.toList newLocs
+  t3 <- getCurrentTime
+  --putStrLn $ "Fetching updates took : " ++ show (diffUTCTime t3 t2)
   -- Wakeup threads that are waiting for the cache to be refreshed
   blockedList <- takeMVar $ cm^.blockedMVar
   putMVar (cm^.blockedMVar) []
   mapM_ (\mv -> putMVar mv ()) blockedList
+  where
+    f :: (ObjType, [ObjectKeyRow]) -> M.Map ShimID SeqNo -> [(ObjType, Key)]
+    f (i, xs) vcMap = foldl (\list x@(key, shimID, seqNo) -> 
+                                let Just rSeqNo = M.lookup shimID vcMap in
+                                if rSeqNo < seqNo then (i, key):list
+                                else list) [] xs
 
 -- Print stats
 printStats :: CacheManager -> ObjType -> Key -> IO ()
@@ -185,7 +220,6 @@ writeEffect :: CacheManager -> ObjType -> Key -> Addr -> Effect -> S.Set Addr
 writeEffect cm ot k addr eff deps const mbtxnid = do
   let Addr sid sqn = addr
   shimId <- readMVar $ cm^.shimId
-  --putStrLn $ "Writing effect from Shim # " ++ show shimId
   -- Does cache include the previous effect?
   isPrevEffectAvailable <- doesCacheInclude cm ot k sid (sqn - 1)
   let isTxn = case mbtxnid of {Nothing -> False; otherwise -> True}
@@ -193,9 +227,12 @@ writeEffect cm ot k addr eff deps const mbtxnid = do
   -- maintains the cache to be a causally consistent cut of the updates. But do
   -- not update cache if the effect is in a transaction. This prevents
   -- uncommitted effects from being made visible.
+  takeMVar $ (cm^.boundMVar)
   vc <- readMVar $ cm^.inMemVClock
+  kBound <- readMVar $ cm^.kBound
+  --putStrLn $ "Trying to write (" ++ show sid ++ ", " ++ show sqn ++ ") from Shim # " ++ show shimId ++" on " ++ show k 
   let seqnoList = getCollumnByShimId shimId vc
-  if (seqnoList !! shimId) <= (Prelude.minimum seqnoList) + cK_BOUND
+  if (seqnoList !! shimId) < (Prelude.minimum seqnoList) + kBound--cK_BOUND
     then do
     if ((not isTxn) && (sqn == 1 || isPrevEffectAvailable))
       then do
@@ -209,7 +246,10 @@ writeEffect cm ot k addr eff deps const mbtxnid = do
         -- Update in memory vector clock & replica seq no.
         counter_val <- takeMVar $ cm^.opCount
         putMVar (cm^.opCount) (counter_val + 1)
-        updateInMemVC shimId (counter_val+1) cm shimId
+        --putStrLn "Reached here"
+        vc <- takeMVar (cm^.inMemVClock)
+        newVc <- updateInMemVC shimId (counter_val+1) vc shimId
+        putMVar (cm^.inMemVClock) newVc
         -- Update cursor
         let !cursorAtKey = case M.lookup (ot,k) cursor of {Nothing -> M.empty; Just m -> m}
         let !newCursorAtKey = M.insert sid sqn cursorAtKey
@@ -221,19 +261,27 @@ writeEffect cm ot k addr eff deps const mbtxnid = do
         let newDeps = case M.lookup (ot,k) curDeps of {Nothing -> S.empty; Just s -> s}
         putMVar (cm^.depsMVar) $ M.insert (ot,k) (S.singleton addr) curDeps
         -- Write to database
-        --putStrLn $ "Got here : 1"
         runCas (cm^.pool) $ cqlInsert ot const k (sid, sqn, newDeps, EffectVal eff, mbtxnid, shimId, counter_val + 1)
+        putMVar (cm^.boundMVar) ()
     else do
       -- Write to database
       counter_val <- takeMVar $ cm^.opCount
       putMVar (cm^.opCount) (counter_val + 1)
+      vc <- takeMVar (cm^.inMemVClock)
+      newVc <- updateInMemVC shimId (counter_val+1) vc shimId
+      putMVar (cm^.inMemVClock) newVc
       runCas (cm^.pool) $ cqlInsert ot const k (sid, sqn, deps, EffectVal eff, mbtxnid, shimId, counter_val + 1)
+      putMVar (cm^.boundMVar) ()
   else do
-    putStrLn "K-Bound reached!"
+    --putStrLn "K-Bound reached!"
+    kBoundedCount <- takeMVar $ cm^.kBoundedOpsCount
+    let newKBoundedCount = kBoundedCount + 1
+    putMVar (cm^.kBoundedOpsCount) newKBoundedCount
+    putMVar (cm^.boundMVar) ()
     waitForCacheRefresh cm ot k
     writeEffect cm ot k addr eff deps const mbtxnid
 
-getCollumnByShimId :: ShimID {-ShimID-} -> InMemoryVC -> [SeqNo]
+getCollumnByShimId :: ShimID -> InMemoryVC -> [SeqNo]
 getCollumnByShimId shimId inMemVClock =
   let seqnoLists = map snd $ M.toList inMemVClock
   in map (f shimId) seqnoLists 
@@ -241,14 +289,13 @@ getCollumnByShimId shimId inMemVClock =
     f :: ShimID -> [SeqNo] -> SeqNo
     f shimId seqnoList = seqnoList !! shimId
 
-updateInMemVC :: ShimID {-Remote ShimID-} -> SeqNo{-New seq no.-} -> CacheManager -> ShimID {-ShimID-} -> IO ()
-updateInMemVC rshimId counter_val cm shimId = do
-  inMemClock <- takeMVar $ cm^.inMemVClock
+updateInMemVC :: ShimID {-Remote ShimID-} -> SeqNo{-New seq no.-} -> InMemoryVC -> ShimID {-ShimID-} -> IO (InMemoryVC)
+updateInMemVC rshimId counter_val inMemClock shimId = do
   let Just seqnoList = M.lookup shimId inMemClock
   if seqnoList !! rshimId < counter_val then do
-    putMVar (cm^.inMemVClock) $ M.insert shimId (replaceNth rshimId counter_val seqnoList) inMemClock
+    return $ M.insert shimId (replaceNth rshimId counter_val seqnoList) inMemClock
   else do
-    putMVar (cm^.inMemVClock) inMemClock
+    return inMemClock
   where
     replaceNth n newVal (x:xs)
          | n == 0 = newVal:xs

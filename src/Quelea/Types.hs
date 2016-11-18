@@ -36,6 +36,7 @@ module Quelea.Types (
 import Database.Cassandra.CQL
 import Data.Serialize as S
 import Control.Applicative ((<$>))
+import Control.Concurrent.MVar
 import Data.ByteString (ByteString, head)
 import Data.Either (rights)
 import Data.Map (Map)

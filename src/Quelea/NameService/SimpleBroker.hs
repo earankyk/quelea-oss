@@ -34,9 +34,9 @@ startBroker f b  = runZMQ $ do
   bind bes $ unBE b
   proxy fes bes Nothing
 
-clientJoin :: Frontend -> IO (String, ZMQ4.Socket ZMQ4.Req)
-clientJoin f = do
-  serverAddr <- runZMQ $ do
+clientJoin :: Frontend -> Int -> IO (String, ZMQ4.Socket ZMQ4.Req)
+clientJoin f port = do
+  {-serverAddr <- runZMQ $ do
     requester <- socket Req
     liftIO $ debugPrint "clientJoin(1)"
     connect requester $ unFE f
@@ -46,11 +46,11 @@ clientJoin f = do
     msg <- receive requester
     liftIO $ debugPrint "clientJoin(4)"
     return $ unpack msg
-  -- Connect to the shim layer node.
+  -- Connect to the shim layer node.-}
   ctxt <- ZMQ4.context
   sock <- ZMQ4.socket ctxt ZMQ4.Req
+  let serverAddr = "tcp://localhost:" ++ show port
   ZMQ4.connect sock serverAddr
-  putStrLn $ "Client joined on " ++ show serverAddr
   return (serverAddr, sock)
 
 
@@ -72,7 +72,7 @@ serverJoin b ip port = do
     {- Start proxy to distribute requests to workers -}
     proxy routerSock dealerSock Nothing
 
-  putStrLn $ "A Server Joined at " ++ show ip ++ show port
+  --putStrLn $ "A Server Joined at " ++ show ip ++ show port
 
   {- Fork a daemon thread that joins with the backend. The daemon shares the
    - servers address for every client request. The client then joins with the
@@ -94,4 +94,4 @@ mkNameService :: Frontend -> Backend
               -> Int {- Backend port (only for sticky) -}
               -> NameService
 mkNameService fe be ip port =
-  NameService fe (clientJoin fe) (serverJoin be ip port)
+  NameService fe (clientJoin fe port) (serverJoin be ip port)
