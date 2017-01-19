@@ -51,6 +51,7 @@ import qualified Data.Set as S
 import qualified Data.Map as M
 import Data.Tuple.Select (sel1)
 import Data.Time
+import Data.ByteString.Char8
 
 class (CasType a, Serialize a) => Effectish a where
   summarize :: [a] -> [a]
@@ -96,7 +97,7 @@ data DatatypeLibrary a = DatatypeLibrary {
 newtype Key = Key { unKey :: ByteString } deriving (Eq, Ord)
 
 instance Show Key where
-  show (Key kv) = "Key " ++ (show $ Data.ByteString.head kv)
+  show (Key kv) = "Key " ++ (show $ {-Data.ByteString.head-}Data.ByteString.Char8.unpack kv)
 
 
 type SeqNo = Int64

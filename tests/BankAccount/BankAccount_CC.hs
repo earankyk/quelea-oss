@@ -35,6 +35,8 @@ import Control.Exception ( SomeException(..), AsyncException(..) , catch, handle
 import System.Exit (exitSuccess)
 import System.Random (randomIO)
 import Data.Monoid
+import Debug.Trace
+import Data.Serialize
 --------------------------------------------------------------------------------
 
 fePort :: Int
@@ -145,8 +147,8 @@ run :: Args -> IO ()
 run args = do
   let k = read $ kind args
   let broker = brokerAddr args
-  let delay = read $ delayReq args
-  --putStrLn $ show bound
+  let delay = read $ delayReq args 
+
   someTime <- getCurrentTime
   let ns1 = mkNameService (Frontend $ "tcp://" ++ broker ++ ":" ++ show fePort)
                          (Backend  $ "tcp://" ++ broker ++ ":" ++ show bePort) "localhost" 5560
@@ -231,7 +233,8 @@ clientCore :: Args -> Int -> UTCTime -- default arguments
            -> NominalDiffTime -> Int -> CSN NominalDiffTime
 clientCore args delay someTime avgLat round = do
   -- Generate key
-  key <- liftIO $ (mkKey . (\i -> i `mod` (100000::Int))) <$> randomIO
+  key <- liftIO $ (mkKey . (\i -> trace (show $ i `mod` (100000::Int))(i `mod` (100000::Int)))) <$> randomIO
+  --liftIO $ putStrLn $ show delta
   -- Delay thread if required
   when (delay /= 0) $ liftIO $ threadDelay delay
   -- Perform the operations
@@ -262,4 +265,4 @@ main = execParser opts >>= run
     opts = info (helper <*> args)
       ( fullDesc
      <> progDesc "Run the bank account benchmark"
-     <> header "BankAccountBenchmark - A benchmark for bank account datatype on Quelea" )
+     <> Options.Applicative.header "BankAccountBenchmark - A benchmark for bank account datatype on Quelea" )

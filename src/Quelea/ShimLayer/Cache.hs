@@ -162,6 +162,7 @@ cacheMgrCore cm = forever $ do
                             objectRows <- runCas (cm^.pool) $ cqlReadObjectKeys ot
                             return $ list ++ (f (ot, objectRows) vcMap)) [] $ S.toList objTypes
   let newLocs = S.union locs (S.fromList objKeyList)
+  --putStrLn $ show newLocs
   -- Fetch updates
   t2 <- getCurrentTime
   --putStrLn $ "Reading " ++ show (S.size newLocs) ++" keys took : " ++ show (diffUTCTime t2 t1)
@@ -218,6 +219,7 @@ getContext cm ot k = do
 writeEffect :: CacheManager -> ObjType -> Key -> Addr -> Effect -> S.Set Addr
             -> Consistency -> Maybe TxnID -> IO ()
 writeEffect cm ot k addr eff deps const mbtxnid = do
+  putStrLn $ show ot ++ " " ++ show k
   let Addr sid sqn = addr
   shimId <- readMVar $ cm^.shimId
   -- Does cache include the previous effect?
@@ -246,7 +248,7 @@ writeEffect cm ot k addr eff deps const mbtxnid = do
         -- Update in memory vector clock & replica seq no.
         counter_val <- takeMVar $ cm^.opCount
         putMVar (cm^.opCount) (counter_val + 1)
-        --putStrLn "Reached here"
+        putStrLn "Reached here"
         vc <- takeMVar (cm^.inMemVClock)
         newVc <- updateInMemVC shimId (counter_val+1) vc shimId
         putMVar (cm^.inMemVClock) newVc

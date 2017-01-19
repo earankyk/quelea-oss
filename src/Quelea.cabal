@@ -30,7 +30,9 @@ Library
     tuple,
     derive,
     process,
-    optparse-applicative
+    optparse-applicative,
+    scotty,
+    aeson
   Exposed-modules:
     Quelea.NameService.Types
     Quelea.NameService.SimpleBroker
@@ -52,7 +54,8 @@ Library
     Quelea.ShimLayer.UpdateFetcher
     Quelea.ShimLayer.GC
   Extensions: CPP
-  ghc-options: -w -O2 -threaded
+  ghc-options: -w -O2 -threaded 
+-- dynamic -shared -fPIC
 
 -- Executable LWW_txn
 -- main-is:

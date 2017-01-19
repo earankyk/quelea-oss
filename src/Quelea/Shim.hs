@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables, EmptyDataDecls,
     TemplateHaskell, DataKinds, OverloadedStrings,
-    DoAndIfThenElse#-}
+    DoAndIfThenElse, ForeignFunctionInterface, 
+    OverloadedStrings, DeriveGeneric #-}
 
 module Quelea.Shim (
  runShimNode,
@@ -8,7 +9,6 @@ module Quelea.Shim (
  mkDtLib
 ) where
 
-import Quelea.Consts
 import Quelea.Types
 import Quelea.Consts
 import Quelea.NameService.Types
@@ -18,6 +18,7 @@ import Quelea.ShimLayer.Cache
 import Quelea.ShimLayer.GC
 import Quelea.ShimLayer.Types
 import Quelea.Contract.Language
+import Quelea.Client(mkKey)
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
@@ -27,11 +28,15 @@ import Control.Monad (forever, replicateM, when)
 import Data.ByteString hiding (map, pack, putStrLn)
 import Data.Either (rights)
 import Data.Map (Map)
+import Data.IORef
+import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Map as M
 import System.ZMQ4.Monadic
 import qualified System.ZMQ4 as ZMQ
 import Data.Maybe (fromJust)
+import Data.Word
 import Control.Lens
+import Control.Monad.State.Lazy
 import System.Posix.Process
 import Database.Cassandra.CQL
 import Data.UUID
@@ -41,7 +46,15 @@ import Data.Text hiding (map)
 import Debug.Trace
 import Control.Concurrent (forkIO, myThreadId, threadDelay)
 import Data.Tuple.Select
-
+import Foreign.C
+import Data.ByteString.Char8 (pack, packCString, unpack)
+import Foreign.Marshal.Array
+import Foreign.Ptr
+import Web.Scotty
+import Data.Aeson (FromJSON, ToJSON)
+import GHC.Generics
+import Data.Serialize
+import System.Random (randomIO)
 
 makeLenses ''Addr
 makeLenses ''DatatypeLibrary
@@ -59,6 +72,14 @@ debugPrint s = do
 debugPrint _ = return ()
 #endif
 
+data RESTEffect = RESTEffect { effect :: String } deriving (Show, Generic)
+instance ToJSON RESTEffect
+instance FromJSON RESTEffect
+
+data RESTAppend = RESTAppend { objType :: String, key :: Int, effectString :: String } deriving (Generic, Show)
+instance ToJSON RESTAppend
+instance FromJSON RESTAppend
+
 runShimNodeWithOpts :: OperationClass a
                     => GCSetting
                     -> Int -- fetch update interval
@@ -75,6 +96,20 @@ runShimNodeWithOpts gcSetting fetchUpdateInterval dtLib serverList keyspace ns s
   pool <- newPool serverList keyspace Nothing
   {- Spawn cache manager -}
   cache <- initCacheManager pool fetchUpdateInterval shimId kBound objTypes
+  let sqn = 1
+  sid <- randomIO
+  forkIO $ scotty (3000 + shimId) $ do
+    Web.Scotty.get "/read/:objType/:key" $ do
+      key <- param "key" 
+      let val = read key :: Int
+      effects <- liftIO $ getEffects cache "BankAccount" (mkKey val)
+      json effects
+    Web.Scotty.post "/append" $ do
+      appendEffect <- jsonData :: ActionM RESTAppend
+      --liftIO $ putStrLn $ (objType appendEffect) ++ " " ++ show (key appendEffect) ++ " " ++ (effectString appendEffect)
+      liftIO $ writeEffect cache (objType appendEffect) (mkKey (key appendEffect)) (Addr (SessID sid) sqn) (Data.ByteString.Char8.pack (effectString appendEffect)) S.empty ONE Nothing
+      let sqn = sqn + 1 
+      return ()
   {- Spawn a pool of workers -}
   replicateM cNUM_WORKERS (forkIO $ worker dtLib pool cache gcSetting shimId)
   --putStrLn $ "Shim #" ++ show shimId ++ " initialized"  ++ " --- Accessing servers@" ++ show serverList
@@ -86,6 +121,11 @@ runShimNodeWithOpts gcSetting fetchUpdateInterval dtLib serverList keyspace ns s
       forkIO $ getServerJoin ns
       {- Start gcWorker -}
       gcWorker dtLib cache
+  where 
+    getEffects cache objType key = do
+      putStrLn $ "Searching effects for key : " ++ show key
+      (effects, _) <- getContext cache objType key
+      return $ map ((\a -> RESTEffect a) . Data.ByteString.Char8.unpack) effects
 
 runShimNode :: OperationClass a
             => DatatypeLibrary a
@@ -231,34 +271,21 @@ doOp op cache request const = do
       S.foldl (\(el,as) (addr, eff) -> (eff:el, S.insert addr as))
               ([], S.empty) effSet
 
-updateInMemVC :: CacheManager -> IO ()
-updateInMemVC cm = do
-  inMemClock <- takeMVar $ cm^.inMemVClock
-  shimId <- readMVar $ cm^.shimId
-  let rshimId = shimId
-  counter_val <- takeMVar $ cm^.opCount
-  putMVar (cm^.opCount) (counter_val + 1)
-  let counter_val = counter_val + 1
-  let Just seqnoList = M.lookup shimId inMemClock
-  if seqnoList !! rshimId < counter_val then do
-    putMVar (cm^.inMemVClock) $ M.insert shimId (replaceNth rshimId counter_val seqnoList) inMemClock
-  else do
-    putMVar (cm^.inMemVClock) inMemClock
-  where
-    replaceNth n newVal (x:xs)
-         | n == 0 = newVal:xs
-         | otherwise = x:replaceNth (n-1) newVal xs
+{-foo :: ObjType -> Key -> State ([Quelea.ShimLayer.Types.Effect], CacheManager)
+foo ot k = runState (do 
+                      cm <- Control.Monad.State.Lazy.get
+                      (effects, _) <- getContext cm ot k
+                      Control.Monad.State.Lazy.put cm
+                      return effects) initialState-}
 
-getCollumnByShimId :: CacheManager -> IO [SeqNo]
-getCollumnByShimId cm = do
-  inMemClock <- readMVar $ cm^.inMemVClock
-  shimId <- readMVar $ cm^.shimId
-  let seqnoLists = map snd $ M.toList inMemClock
-  return $ map (f shimId) seqnoLists 
-  where
-    f :: ShimID -> [SeqNo] -> SeqNo
-    f shimId seqnoList = seqnoList !! shimId
-
+{-foreign export ccall readEffects :: CString -> CString -> IO (Ptr CString)--[CString]--[Quelea.ShimLayer.Types.Effect]
+readEffects ot k = do
+  cm <- readMVar test
+  key <- packCString k
+  objectType <- peekCString ot
+  (effects, _) <- getContext cm objectType (Key key)
+  effectsList <- mapM (newCString . Data.ByteString.Char8.unpack) effects
+  newArray effectsList-}
 
 mkDtLib :: OperationClass a => [(a, (GenOpFun, GenSumFun), Availability)] -> DatatypeLibrary a
 mkDtLib l =
@@ -268,5 +295,3 @@ mkDtLib l =
     core (m1, m2) (op, (fun1, fun2), av) =
       (M.insert (getObjType op, op) (fun1, av) m1,
        M.insert (getObjType op) fun2 m2)
-
-

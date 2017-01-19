@@ -34,7 +34,7 @@ import Control.Exception ( SomeException(..), AsyncException(..) , catch, handle
 import System.Exit (exitSuccess)
 import System.Random (randomIO)
 import Data.Monoid
-
+import Debug.Trace
 --------------------------------------------------------------------------------
 
 fePort :: Int
@@ -222,7 +222,9 @@ clientCore :: Args -> Int -> UTCTime -- default arguments
            -> NominalDiffTime -> Int -> CSN NominalDiffTime
 clientCore args delay someTime avgLat round = do
   -- Generate key
-  key <- liftIO $ (mkKey . (\i -> i `mod` (100000::Int))) <$> randomIO
+  --delta <- liftIO $ randomIO
+  key <- liftIO $ (mkKey . (\i -> trace (show $ i `mod` (100000::Int))(i `mod` (100000::Int)))) <$> randomIO
+  --let key = mkKey delta
   -- Delay thread if required
   when (delay /= 0) $ liftIO $ threadDelay delay
   -- Perform the operations
